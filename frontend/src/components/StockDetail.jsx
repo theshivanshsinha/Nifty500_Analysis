@@ -21,21 +21,20 @@ const StockDetail = () => {
     let chart;
     let resizeHandler;
 
-    // Fetch stock snapshot + sentiment news in parallel
+    // Fetch quote, history and news in parallel
     Promise.all([
-      fetch(`${API_BASE}/stocks/${fullSymbol}/snapshot`).then((r) => {
-        if (!r.ok) throw new Error('Failed to load stock snapshot');
+      fetch(`${API_BASE}/stocks/${fullSymbol}/quote`).then((r) => {
+        if (!r.ok) throw new Error('Failed to load quote');
         return r.json();
       }),
+      fetch(`${API_BASE}/stocks/${fullSymbol}/history?interval=1d`).then((r) => (r.ok ? r.json() : [])),
       fetch(`${API_BASE}/stocks/${fullSymbol}/sentiment-news`).then((r) => {
         if (!r.ok) throw new Error('Failed to load news');
         return r.json();
       }),
-    ]).then(([snapshotData, newsData]) => {
-      const historyData = snapshotData?.history || [];
-      const quoteData = snapshotData?.quote || null;
-      const technicalData = snapshotData?.technicals || null;
-      const alertData = snapshotData?.alerts || null;
+      fetch(`${API_BASE}/stocks/${fullSymbol}/technicals`).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${API_BASE}/stocks/${fullSymbol}/alerts`).then((r) => (r.ok ? r.json() : null)),
+    ]).then(([quoteData, historyData, newsData, technicalData, alertData]) => {
       setQuote(quoteData);
       setNews(newsData?.items || []);
       setTechnicals(technicalData);
