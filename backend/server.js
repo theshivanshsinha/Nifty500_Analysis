@@ -9,8 +9,9 @@ app.use(express.json());
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const SHORT_CACHE_TTL = 20 * 1000;
-const LONG_CACHE_TTL = 30 * 1000;
+const SHORT_CACHE_TTL = 90 * 1000;
+const LONG_CACHE_TTL = 5 * 60 * 1000;
+const VERY_LONG_CACHE_TTL = 10 * 60 * 1000;
 const cacheStore = new Map();
 
 function parseCsvLine(line) {
@@ -79,25 +80,34 @@ function clearTransientCache() {
 }
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const withTimeout = (promise, ms, message) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
 
 async function fetchYahooChart(symbol, interval = '1d', range = '1y') {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     symbol
   )}?range=${encodeURIComponent(range)}&interval=${encodeURIComponent(interval)}`;
 
-  const attempts = 3;
+  const attempts = 2;
   let lastError;
 
   for (let i = 0; i < attempts; i += 1) {
     try {
-      const response = await fetch(url, {
-        headers: {
-          'user-agent': DEFAULT_UA,
-          accept: 'application/json',
-          referer: `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`,
-          'accept-language': 'en-US,en;q=0.9',
-        },
-      });
+      const response = await withTimeout(
+        fetch(url, {
+          headers: {
+            'user-agent': DEFAULT_UA,
+            accept: 'application/json',
+            referer: `https://finance.yahoo.com/quote/${encodeURIComponent(symbol)}`,
+            'accept-language': 'en-US,en;q=0.9',
+          },
+        }),
+        4500,
+        'Upstream timeout'
+      );
 
       if (response.status === 429) {
         throw new Error('Yahoo rate limit reached');
@@ -526,7 +536,7 @@ app.get('/api/news/market', async (req, res) => {
 
 app.get('/api/analytics/sectors', async (req, res) => {
   try {
-    const payload = await withCache('analytics:sectors', LONG_CACHE_TTL, async () => {
+    const payload = await withCache('analytics:sectors', VERY_LONG_CACHE_TTL, async () => {
       const symbols = await fetchNifty500Constituents();
       const bySector = symbols.reduce((acc, item) => {
         if (!acc[item.sector]) acc[item.sector] = [];
@@ -538,7 +548,7 @@ app.get('/api/analytics/sectors', async (req, res) => {
       const sectorAnalytics = await runWithConcurrency(
         sectorEntries,
         async ([sectorName, constituents]) => {
-          const sampleSymbols = constituents.slice(0, 8);
+          const sampleSymbols = constituents.slice(0, 4);
           const stockAnalytics = await runWithConcurrency(
             sampleSymbols,
             async (item) => {
@@ -565,7 +575,7 @@ app.get('/api/analytics/sectors', async (req, res) => {
                 return null;
               }
             },
-            4
+            2
           );
 
           const valid = stockAnalytics.filter(Boolean);
@@ -591,7 +601,7 @@ app.get('/api/analytics/sectors', async (req, res) => {
             topMovers: buildTopMovers(valid),
           };
         },
-        3
+        2
       );
 
       const ranked = sectorAnalytics
@@ -613,43 +623,19 @@ app.get('/api/analytics/sectors', async (req, res) => {
 
 app.get('/api/analytics/sector-heatmap', async (req, res) => {
   try {
-    const data = await withCache('analytics:sectors', LONG_CACHE_TTL, async () => {
-      const symbols = await fetchNifty500Constituents();
-      const bySector = symbols.reduce((acc, item) => {
-        if (!acc[item.sector]) acc[item.sector] = [];
-        acc[item.sector].push(item);
-        return acc;
-      }, {});
-      return { bySector };
-    });
-    const sectorNames = Object.keys(data.bySector);
-    const heatmap = await runWithConcurrency(
-      sectorNames,
-      async (sector) => {
-        const sample = data.bySector[sector].slice(0, 6);
-        const returns = [];
-        for (const s of sample) {
-          try {
-            const chart = await withCache(`chart:${s.symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
-              fetchYahooChart(s.symbol, '1d', '3mo')
-            );
-            const rows = toHistoryRows(chart?.chart?.result?.[0]);
-            if (rows.length > 5) {
-              const start = rows[0].close;
-              const end = rows[rows.length - 1].close;
-              returns.push(((end - start) / start) * 100);
-            }
-          } catch (e) {}
-        }
-        const avgReturn = returns.length ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
-        return {
-          sector,
-          value: Number(avgReturn.toFixed(2)),
-          color: avgReturn >= 2 ? '#16a34a' : avgReturn >= 0 ? '#22c55e' : avgReturn <= -2 ? '#dc2626' : '#f97316',
-        };
-      },
-      3
-    );
+    const sectorsPayload = await withCache('analytics:sectors', VERY_LONG_CACHE_TTL, async () => ({ sectors: [] }));
+    const heatmap = (sectorsPayload.sectors || []).map((s) => ({
+      sector: s.sector,
+      value: Number((s.avgReturnPct ?? 0).toFixed(2)),
+      color:
+        (s.avgReturnPct ?? 0) >= 2
+          ? '#16a34a'
+          : (s.avgReturnPct ?? 0) >= 0
+            ? '#22c55e'
+            : (s.avgReturnPct ?? 0) <= -2
+              ? '#dc2626'
+              : '#f97316',
+    }));
     res.json({ items: heatmap });
   } catch (error) {
     console.error(error);
@@ -664,41 +650,43 @@ app.get('/api/screener', async (req, res) => {
     const preset = String(req.query.preset || '').toLowerCase();
     const sector = String(req.query.sector || '').trim();
 
-    const symbols = await fetchNifty500Constituents();
-    const universe = symbols.slice(0, 120);
-    const rows = await runWithConcurrency(
-      universe,
-      async (item) => {
-        try {
-          const chartPayload = await withCache(`chart:${item.symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
-            fetchYahooChart(item.symbol, '1d', '3mo')
-          );
-          const chartResult = chartPayload?.chart?.result?.[0];
-          const quote = normalizeQuoteFromChart(chartResult, item.symbol);
-          const technicals = calculateTechnicals(toHistoryRows(chartResult));
-          const pe = chartResult?.meta?.trailingPE ?? null;
-          const volumeSpike =
-            technicals.latestVolume && technicals.avg20Volume
-              ? technicals.latestVolume / technicals.avg20Volume
-              : null;
+    const rows = await withCache('screener:base', VERY_LONG_CACHE_TTL, async () => {
+      const symbols = await fetchNifty500Constituents();
+      const universe = symbols.slice(0, 60);
+      return runWithConcurrency(
+        universe,
+        async (item) => {
+          try {
+            const chartPayload = await withCache(`chart:${item.symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
+              fetchYahooChart(item.symbol, '1d', '3mo')
+            );
+            const chartResult = chartPayload?.chart?.result?.[0];
+            const quote = normalizeQuoteFromChart(chartResult, item.symbol);
+            const technicals = calculateTechnicals(toHistoryRows(chartResult));
+            const pe = chartResult?.meta?.trailingPE ?? null;
+            const volumeSpike =
+              technicals.latestVolume && technicals.avg20Volume
+                ? technicals.latestVolume / technicals.avg20Volume
+                : null;
 
-          return {
-            symbol: item.symbol,
-            companyName: item.companyName,
-            sector: item.sector,
-            pe,
-            roe: null,
-            debtToEquity: null,
-            price: quote.regularMarketPrice,
-            changePct: quote.regularMarketChangePercent,
-            volumeSpike,
-          };
-        } catch (error) {
-          return null;
-        }
-      },
-      6
-    );
+            return {
+              symbol: item.symbol,
+              companyName: item.companyName,
+              sector: item.sector,
+              pe,
+              roe: null,
+              debtToEquity: null,
+              price: quote.regularMarketPrice,
+              changePct: quote.regularMarketChangePercent,
+              volumeSpike,
+            };
+          } catch (error) {
+            return null;
+          }
+        },
+        4
+      );
+    });
 
     let filtered = rows.filter(Boolean);
     if (sector) filtered = filtered.filter((r) => r.sector === sector);
@@ -747,6 +735,43 @@ app.get('/api/stocks/:symbol/history', async (req, res) => {
   } catch (error) {
     console.error('Error fetching historical data for', symbol, error);
     res.status(503).json({ error: 'Failed to fetch historical data (upstream throttled)' });
+  }
+});
+
+app.get('/api/stocks/:symbol/snapshot', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const chartData = await withCache(`chart:${symbol}:1d:1y`, SHORT_CACHE_TTL, () =>
+      fetchYahooChart(symbol, '1d', '1y')
+    );
+    const result = chartData?.chart?.result?.[0];
+    const history = toHistoryRows(result);
+    const quote = normalizeQuoteFromChart(result, symbol);
+    const technicals = calculateTechnicals(history);
+
+    const latest = history[history.length - 1];
+    const prevRows = history.slice(-21, -1);
+    const resistance = prevRows.length ? Math.max(...prevRows.map((r) => r.high)) : null;
+    const breakout = resistance !== null && latest?.close > resistance;
+    const volumeSpike =
+      technicals.latestVolume && technicals.avg20Volume
+        ? technicals.latestVolume / technicals.avg20Volume > 1.5
+        : false;
+    const rsiCrossing =
+      technicals.rsi14Prev !== null &&
+      technicals.rsi14 !== null &&
+      ((technicals.rsi14Prev < 70 && technicals.rsi14 >= 70) ||
+        (technicals.rsi14Prev > 30 && technicals.rsi14 <= 30));
+
+    res.json({
+      quote,
+      history,
+      technicals,
+      alerts: { breakout, volumeSpike, rsiCrossing, resistance, rsi14: technicals.rsi14 },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(503).json({ error: 'Failed to fetch stock snapshot' });
   }
 });
 
@@ -877,24 +902,33 @@ app.get('/api/analytics/correlation', async (req, res) => {
       .filter(Boolean);
     const symbols =
       provided.length > 1
-        ? provided.map((s) => (s.endsWith('.NS') ? s : `${s}.NS`)).slice(0, 10)
+        ? provided.map((s) => (s.endsWith('.NS') ? s : `${s}.NS`)).slice(0, 8)
         : (await fetchNifty500Constituents()).slice(0, 8).map((s) => s.symbol);
 
-    const series = {};
-    for (const symbol of symbols) {
-      try {
-        const chart = await withCache(`chart:${symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
-          fetchYahooChart(symbol, '1d', '3mo')
-        );
-        const rows = toHistoryRows(chart?.chart?.result?.[0]);
-        const closes = rows.map((r) => r.close).filter((v) => typeof v === 'number');
-        const rets = [];
-        for (let i = 1; i < closes.length; i += 1) {
-          rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+    const pairs = await runWithConcurrency(
+      symbols,
+      async (symbol) => {
+        try {
+          const chart = await withCache(`chart:${symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
+            fetchYahooChart(symbol, '1d', '3mo')
+          );
+          const rows = toHistoryRows(chart?.chart?.result?.[0]);
+          const closes = rows.map((r) => r.close).filter((v) => typeof v === 'number');
+          const rets = [];
+          for (let i = 1; i < closes.length; i += 1) {
+            rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+          }
+          return { symbol, rets };
+        } catch (e) {
+          return null;
         }
-        series[symbol] = rets;
-      } catch (e) {}
-    }
+      },
+      4
+    );
+    const series = {};
+    pairs.filter(Boolean).forEach((p) => {
+      series[p.symbol] = p.rets;
+    });
 
     const keys = Object.keys(series);
     const minLen = Math.min(...keys.map((k) => series[k].length));

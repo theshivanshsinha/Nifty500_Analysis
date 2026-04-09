@@ -77,9 +77,9 @@ const Dashboard = () => {
     return { topSectors, weakSectors };
   }, [sectorAnalytics]);
 
-  const fetchDashboardData = useCallback((currentNewsWindow = newsWindow) => {
+  const fetchDashboardData = useCallback((currentNewsWindow = newsWindow, includeHeavy = true) => {
     let completed = 0;
-    const total = 4;
+    const total = includeHeavy ? 4 : 2;
     const bumpProgress = () => {
       completed += 1;
       setLoadingProgress(Math.min(100, Math.round((completed / total) * 100)));
@@ -91,12 +91,14 @@ const Dashboard = () => {
         return res.json();
       })
       .finally(bumpProgress);
-    const sectorReq = fetch(`${API_BASE}/analytics/sectors`)
-      .then((res) => {
-        if (!res.ok) throw new Error('Failed sector analytics');
-        return res.json();
-      })
-      .finally(bumpProgress);
+    const sectorReq = includeHeavy
+      ? fetch(`${API_BASE}/analytics/sectors`)
+          .then((res) => {
+            if (!res.ok) throw new Error('Failed sector analytics');
+            return res.json();
+          })
+          .finally(bumpProgress)
+      : Promise.resolve(null);
     const newsReq = fetch(`${API_BASE}/news/market?window=${currentNewsWindow}`)
       .then((res) => {
         if (!res.ok) throw new Error('Failed market news');
@@ -104,12 +106,20 @@ const Dashboard = () => {
       })
       .finally(bumpProgress);
 
-    const heatmapReq = fetch(`${API_BASE}/analytics/sector-heatmap`).then((res) => (res.ok ? res.json() : { items: [] })).finally(bumpProgress);
+    const heatmapReq = includeHeavy
+      ? fetch(`${API_BASE}/analytics/sector-heatmap`)
+          .then((res) => (res.ok ? res.json() : { items: [] }))
+          .finally(bumpProgress)
+      : Promise.resolve(null);
     return Promise.all([symbolsReq, sectorReq, newsReq, heatmapReq]).then(([symbolsData, sectorData, newsData, heatmapData]) => {
       setSymbols(symbolsData);
-      setSectorAnalytics(sectorData?.sectors || []);
+      if (sectorData?.sectors) {
+        setSectorAnalytics(sectorData.sectors || []);
+      }
       setMarketNews(newsData?.items || []);
-      setHeatmap(heatmapData?.items || []);
+      if (heatmapData?.items) {
+        setHeatmap(heatmapData.items || []);
+      }
       setLoadingProgress(100);
     });
   }, [newsWindow]);
@@ -140,12 +150,12 @@ const Dashboard = () => {
         setLoading(false);
       });
 
-    // Background refresh every 25 seconds to keep cards and movers fresh.
+    // Keep refresh light to avoid upstream throttling.
     const intervalId = setInterval(() => {
-      fetchDashboardData(newsWindow).catch((error) => {
+      fetchDashboardData(newsWindow, false).catch((error) => {
         console.error(error);
       });
-    }, 25 * 1000);
+    }, 60 * 1000);
 
     return () => clearInterval(intervalId);
   }, [fetchDashboardData, newsWindow]);
