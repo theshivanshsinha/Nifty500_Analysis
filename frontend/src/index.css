@@ -315,6 +315,23 @@ body {
   cursor: pointer;
 }
 
+.heatmap-grid {
+  margin-top: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.6rem;
+}
+
+.heatmap-cell {
+  border-radius: 0.65rem;
+  padding: 0.7rem;
+  color: #fff;
+  min-height: 70px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
 .dashboard-news-header {
   display: flex;
   justify-content: space-between;

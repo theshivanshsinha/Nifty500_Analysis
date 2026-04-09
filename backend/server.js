@@ -237,6 +237,168 @@ function toHistoryRows(chartResult) {
     );
 }
 
+function ema(values, period) {
+  const k = 2 / (period + 1);
+  const out = [];
+  let prev;
+  values.forEach((v, idx) => {
+    if (typeof v !== 'number') {
+      out.push(null);
+      return;
+    }
+    if (idx === 0 || prev === undefined) {
+      prev = v;
+    } else {
+      prev = v * k + prev * (1 - k);
+    }
+    out.push(prev);
+  });
+  return out;
+}
+
+function sma(values, period) {
+  return values.map((_, idx) => {
+    if (idx + 1 < period) return null;
+    const window = values.slice(idx + 1 - period, idx + 1).filter((v) => typeof v === 'number');
+    if (window.length !== period) return null;
+    return window.reduce((sum, v) => sum + v, 0) / period;
+  });
+}
+
+function stdDev(values) {
+  if (values.length < 2) return 0;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function calculateRsi(values, period = 14) {
+  if (values.length <= period) return { latest: null, previous: null, series: [] };
+  const changes = [];
+  for (let i = 1; i < values.length; i += 1) {
+    changes.push(values[i] - values[i - 1]);
+  }
+
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 0; i < period; i += 1) {
+    const c = changes[i];
+    if (c > 0) avgGain += c;
+    else avgLoss += Math.abs(c);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  const rsiSeries = new Array(period).fill(null);
+  for (let i = period; i < changes.length; i += 1) {
+    const c = changes[i];
+    const gain = c > 0 ? c : 0;
+    const loss = c < 0 ? Math.abs(c) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    const rsi = 100 - 100 / (1 + rs);
+    rsiSeries.push(rsi);
+  }
+
+  return {
+    latest: rsiSeries[rsiSeries.length - 1] ?? null,
+    previous: rsiSeries[rsiSeries.length - 2] ?? null,
+    series: rsiSeries,
+  };
+}
+
+function calculateTechnicals(history) {
+  const closes = history.map((h) => h.close);
+  const volumes = history.map((h) => h.volume ?? 0);
+  const ma50Series = sma(closes, 50);
+  const ma200Series = sma(closes, 200);
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  const macdSeries = ema12.map((v, idx) => (v !== null && ema26[idx] !== null ? v - ema26[idx] : null));
+  const signalSeries = ema(macdSeries.map((v) => (typeof v === 'number' ? v : 0)), 9);
+  const histogramSeries = macdSeries.map((v, idx) => (typeof v === 'number' ? v - signalSeries[idx] : null));
+  const rsi = calculateRsi(closes, 14);
+
+  const bbMiddle = sma(closes, 20);
+  const bbUpper = closes.map((_, idx) => {
+    if (idx + 1 < 20) return null;
+    const window = closes.slice(idx + 1 - 20, idx + 1);
+    if (window.some((v) => typeof v !== 'number')) return null;
+    return bbMiddle[idx] + 2 * stdDev(window);
+  });
+  const bbLower = closes.map((_, idx) => {
+    if (idx + 1 < 20) return null;
+    const window = closes.slice(idx + 1 - 20, idx + 1);
+    if (window.some((v) => typeof v !== 'number')) return null;
+    return bbMiddle[idx] - 2 * stdDev(window);
+  });
+
+  const latestVolume = volumes[volumes.length - 1] ?? null;
+  const avg20Volume =
+    volumes.length >= 20
+      ? volumes.slice(-20).reduce((sum, v) => sum + v, 0) / 20
+      : null;
+
+  return {
+    rsi14: rsi.latest,
+    rsi14Prev: rsi.previous,
+    macd: macdSeries[macdSeries.length - 1] ?? null,
+    macdSignal: signalSeries[signalSeries.length - 1] ?? null,
+    macdHistogram: histogramSeries[histogramSeries.length - 1] ?? null,
+    ma50: ma50Series[ma50Series.length - 1] ?? null,
+    ma200: ma200Series[ma200Series.length - 1] ?? null,
+    bollingerUpper: bbUpper[bbUpper.length - 1] ?? null,
+    bollingerMiddle: bbMiddle[bbMiddle.length - 1] ?? null,
+    bollingerLower: bbLower[bbLower.length - 1] ?? null,
+    latestVolume,
+    avg20Volume,
+    series: {
+      ma50: history.map((h, idx) => ({ date: h.date, value: ma50Series[idx] })).filter((x) => typeof x.value === 'number'),
+      ma200: history.map((h, idx) => ({ date: h.date, value: ma200Series[idx] })).filter((x) => typeof x.value === 'number'),
+      bbUpper: history.map((h, idx) => ({ date: h.date, value: bbUpper[idx] })).filter((x) => typeof x.value === 'number'),
+      bbMiddle: history.map((h, idx) => ({ date: h.date, value: bbMiddle[idx] })).filter((x) => typeof x.value === 'number'),
+      bbLower: history.map((h, idx) => ({ date: h.date, value: bbLower[idx] })).filter((x) => typeof x.value === 'number'),
+    },
+  };
+}
+
+function classifySentiment(text) {
+  const t = text.toLowerCase();
+  const bullishWords = ['surge', 'jump', 'beat', 'growth', 'up', 'rally', 'strong', 'outperform', 'buy'];
+  const bearishWords = ['fall', 'drop', 'miss', 'weak', 'down', 'lawsuit', 'loss', 'underperform', 'sell', 'risk'];
+  let score = 0;
+  bullishWords.forEach((w) => {
+    if (t.includes(w)) score += 1;
+  });
+  bearishWords.forEach((w) => {
+    if (t.includes(w)) score -= 1;
+  });
+  if (score > 0) return 'bullish';
+  if (score < 0) return 'bearish';
+  return 'neutral';
+}
+
+function correlation(a, b) {
+  if (!a.length || !b.length || a.length !== b.length) return null;
+  const n = a.length;
+  const meanA = a.reduce((s, v) => s + v, 0) / n;
+  const meanB = b.reduce((s, v) => s + v, 0) / n;
+  let num = 0;
+  let denA = 0;
+  let denB = 0;
+  for (let i = 0; i < n; i += 1) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    num += da * db;
+    denA += da * da;
+    denB += db * db;
+  }
+  const den = Math.sqrt(denA * denB);
+  if (den === 0) return null;
+  return num / den;
+}
+
 function calcStatsFromCloses(closes) {
   const cleanCloses = closes.filter((v) => typeof v === 'number');
   if (cleanCloses.length < 3) {
@@ -449,6 +611,119 @@ app.get('/api/analytics/sectors', async (req, res) => {
   }
 });
 
+app.get('/api/analytics/sector-heatmap', async (req, res) => {
+  try {
+    const data = await withCache('analytics:sectors', LONG_CACHE_TTL, async () => {
+      const symbols = await fetchNifty500Constituents();
+      const bySector = symbols.reduce((acc, item) => {
+        if (!acc[item.sector]) acc[item.sector] = [];
+        acc[item.sector].push(item);
+        return acc;
+      }, {});
+      return { bySector };
+    });
+    const sectorNames = Object.keys(data.bySector);
+    const heatmap = await runWithConcurrency(
+      sectorNames,
+      async (sector) => {
+        const sample = data.bySector[sector].slice(0, 6);
+        const returns = [];
+        for (const s of sample) {
+          try {
+            const chart = await withCache(`chart:${s.symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
+              fetchYahooChart(s.symbol, '1d', '3mo')
+            );
+            const rows = toHistoryRows(chart?.chart?.result?.[0]);
+            if (rows.length > 5) {
+              const start = rows[0].close;
+              const end = rows[rows.length - 1].close;
+              returns.push(((end - start) / start) * 100);
+            }
+          } catch (e) {}
+        }
+        const avgReturn = returns.length ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+        return {
+          sector,
+          value: Number(avgReturn.toFixed(2)),
+          color: avgReturn >= 2 ? '#16a34a' : avgReturn >= 0 ? '#22c55e' : avgReturn <= -2 ? '#dc2626' : '#f97316',
+        };
+      },
+      3
+    );
+    res.json({ items: heatmap });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch sector heatmap' });
+  }
+});
+
+app.get('/api/screener', async (req, res) => {
+  try {
+    const peMax = req.query.peMax ? Number(req.query.peMax) : null;
+    const volumeSpikeMin = req.query.volumeSpikeMin ? Number(req.query.volumeSpikeMin) : null;
+    const preset = String(req.query.preset || '').toLowerCase();
+    const sector = String(req.query.sector || '').trim();
+
+    const symbols = await fetchNifty500Constituents();
+    const universe = symbols.slice(0, 120);
+    const rows = await runWithConcurrency(
+      universe,
+      async (item) => {
+        try {
+          const chartPayload = await withCache(`chart:${item.symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
+            fetchYahooChart(item.symbol, '1d', '3mo')
+          );
+          const chartResult = chartPayload?.chart?.result?.[0];
+          const quote = normalizeQuoteFromChart(chartResult, item.symbol);
+          const technicals = calculateTechnicals(toHistoryRows(chartResult));
+          const pe = chartResult?.meta?.trailingPE ?? null;
+          const volumeSpike =
+            technicals.latestVolume && technicals.avg20Volume
+              ? technicals.latestVolume / technicals.avg20Volume
+              : null;
+
+          return {
+            symbol: item.symbol,
+            companyName: item.companyName,
+            sector: item.sector,
+            pe,
+            roe: null,
+            debtToEquity: null,
+            price: quote.regularMarketPrice,
+            changePct: quote.regularMarketChangePercent,
+            volumeSpike,
+          };
+        } catch (error) {
+          return null;
+        }
+      },
+      6
+    );
+
+    let filtered = rows.filter(Boolean);
+    if (sector) filtered = filtered.filter((r) => r.sector === sector);
+    if (peMax !== null) filtered = filtered.filter((r) => typeof r.pe === 'number' && r.pe <= peMax);
+    if (volumeSpikeMin !== null) {
+      filtered = filtered.filter((r) => typeof r.volumeSpike === 'number' && r.volumeSpike >= volumeSpikeMin);
+    }
+
+    if (preset === 'undervalued') {
+      filtered = filtered.filter((r) => typeof r.pe === 'number' && r.pe < 20 && (r.changePct ?? 0) > -2);
+    } else if (preset === 'momentum') {
+      filtered = filtered.filter((r) => (r.changePct ?? 0) > 1.5 && (r.volumeSpike ?? 0) > 1.1);
+    }
+
+    filtered = filtered.sort((a, b) => (b.changePct ?? -Infinity) - (a.changePct ?? -Infinity));
+    res.json({
+      note: 'ROE and Debt/Equity are currently unavailable from free live endpoints and are returned as null.',
+      items: filtered.slice(0, 80),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to run screener' });
+  }
+});
+
 // Fetch historical data for candlestick charts
 app.get('/api/stocks/:symbol/history', async (req, res) => {
   const { symbol } = req.params;
@@ -460,7 +735,15 @@ app.get('/api/stocks/:symbol/history', async (req, res) => {
       fetchYahooChart(symbol, interval || '1d', '1y')
     );
     const result = chartData?.chart?.result?.[0];
-    res.json(toHistoryRows(result));
+    const rows = toHistoryRows(result);
+    if (rows.length > 0) {
+      return res.json(rows);
+    }
+    const fallback = await withCache(`chart:${symbol}:${interval || '1d'}:6mo`, SHORT_CACHE_TTL, () =>
+      fetchYahooChart(symbol, interval || '1d', '6mo')
+    );
+    const fallbackRows = toHistoryRows(fallback?.chart?.result?.[0]);
+    res.json(fallbackRows);
   } catch (error) {
     console.error('Error fetching historical data for', symbol, error);
     res.status(503).json({ error: 'Failed to fetch historical data (upstream throttled)' });
@@ -505,6 +788,127 @@ app.get('/api/stocks/:symbol/news', async (req, res) => {
     res.json(parseGoogleNewsRss(xmlText));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch news' });
+  }
+});
+
+app.get('/api/stocks/:symbol/technicals', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const chartData = await withCache(`chart:${symbol}:1d:1y`, SHORT_CACHE_TTL, () =>
+      fetchYahooChart(symbol, '1d', '1y')
+    );
+    const rows = toHistoryRows(chartData?.chart?.result?.[0]);
+    const technicals = calculateTechnicals(rows);
+    res.json(technicals);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch technical indicators' });
+  }
+});
+
+app.get('/api/stocks/:symbol/sentiment-news', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const query = symbol.replace('.NS', '') + ' NSE stock';
+    const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-IN&gl=IN&ceid=IN:en`;
+    const response = await fetch(rssUrl, {
+      headers: {
+        'user-agent': DEFAULT_UA,
+        accept: 'application/rss+xml,application/xml,text/xml',
+      },
+    });
+    const xmlText = await response.text();
+    const items = parseGoogleNewsRss(xmlText).map((item) => ({
+      ...item,
+      sentiment: classifySentiment(`${item.title} ${item.publisher}`),
+    }));
+    const counts = items.reduce(
+      (acc, item) => {
+        acc[item.sentiment] += 1;
+        return acc;
+      },
+      { bullish: 0, bearish: 0, neutral: 0 }
+    );
+    res.json({ summary: counts, items });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch sentiment news' });
+  }
+});
+
+app.get('/api/stocks/:symbol/alerts', async (req, res) => {
+  const { symbol } = req.params;
+  try {
+    const chartData = await withCache(`chart:${symbol}:1d:6mo`, SHORT_CACHE_TTL, () =>
+      fetchYahooChart(symbol, '1d', '6mo')
+    );
+    const rows = toHistoryRows(chartData?.chart?.result?.[0]);
+    const technicals = calculateTechnicals(rows);
+    const latest = rows[rows.length - 1];
+    const prevRows = rows.slice(-21, -1);
+    const resistance = prevRows.length ? Math.max(...prevRows.map((r) => r.high)) : null;
+    const breakout = resistance !== null && latest?.close > resistance;
+    const volumeSpike =
+      technicals.latestVolume && technicals.avg20Volume
+        ? technicals.latestVolume / technicals.avg20Volume > 1.5
+        : false;
+    const rsiCrossing =
+      technicals.rsi14Prev !== null &&
+      technicals.rsi14 !== null &&
+      ((technicals.rsi14Prev < 70 && technicals.rsi14 >= 70) ||
+        (technicals.rsi14Prev > 30 && technicals.rsi14 <= 30));
+
+    res.json({
+      breakout,
+      volumeSpike,
+      rsiCrossing,
+      resistance,
+      rsi14: technicals.rsi14,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to evaluate alerts' });
+  }
+});
+
+app.get('/api/analytics/correlation', async (req, res) => {
+  try {
+    const provided = String(req.query.symbols || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const symbols =
+      provided.length > 1
+        ? provided.map((s) => (s.endsWith('.NS') ? s : `${s}.NS`)).slice(0, 10)
+        : (await fetchNifty500Constituents()).slice(0, 8).map((s) => s.symbol);
+
+    const series = {};
+    for (const symbol of symbols) {
+      try {
+        const chart = await withCache(`chart:${symbol}:1d:3mo`, SHORT_CACHE_TTL, () =>
+          fetchYahooChart(symbol, '1d', '3mo')
+        );
+        const rows = toHistoryRows(chart?.chart?.result?.[0]);
+        const closes = rows.map((r) => r.close).filter((v) => typeof v === 'number');
+        const rets = [];
+        for (let i = 1; i < closes.length; i += 1) {
+          rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+        }
+        series[symbol] = rets;
+      } catch (e) {}
+    }
+
+    const keys = Object.keys(series);
+    const minLen = Math.min(...keys.map((k) => series[k].length));
+    const matrix = keys.map((a) =>
+      keys.map((b) => {
+        const av = series[a].slice(-minLen);
+        const bv = series[b].slice(-minLen);
+        const c = correlation(av, bv);
+        return c === null ? null : Number(c.toFixed(2));
+      })
+    );
+    res.json({ symbols: keys, matrix });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to build correlation matrix' });
   }
 });
 

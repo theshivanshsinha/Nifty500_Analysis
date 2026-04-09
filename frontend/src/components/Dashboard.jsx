@@ -11,11 +11,17 @@ const Dashboard = () => {
   const [sectorAnalytics, setSectorAnalytics] = useState([]);
   const [marketNews, setMarketNews] = useState([]);
   const [newsWindow, setNewsWindow] = useState('day');
+  const [heatmap, setHeatmap] = useState([]);
+  const [screener, setScreener] = useState([]);
+  const [correlation, setCorrelation] = useState({ symbols: [], matrix: [] });
   const [loading, setLoading] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [searchTerm, setSearchTerm] = useState('');
   const [sectorFilter, setSectorFilter] = useState('All');
   const [sortBy, setSortBy] = useState('symbol');
+  const [screenerPreset, setScreenerPreset] = useState('momentum');
+  const [peMax, setPeMax] = useState('');
+  const [volumeSpikeMin, setVolumeSpikeMin] = useState('1.1');
   const [watchlist, setWatchlist] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem('nifty500_watchlist') || '[]');
@@ -73,7 +79,7 @@ const Dashboard = () => {
 
   const fetchDashboardData = useCallback((currentNewsWindow = newsWindow) => {
     let completed = 0;
-    const total = 3;
+    const total = 4;
     const bumpProgress = () => {
       completed += 1;
       setLoadingProgress(Math.min(100, Math.round((completed / total) * 100)));
@@ -98,13 +104,32 @@ const Dashboard = () => {
       })
       .finally(bumpProgress);
 
-    return Promise.all([symbolsReq, sectorReq, newsReq]).then(([symbolsData, sectorData, newsData]) => {
+    const heatmapReq = fetch(`${API_BASE}/analytics/sector-heatmap`).then((res) => (res.ok ? res.json() : { items: [] })).finally(bumpProgress);
+    return Promise.all([symbolsReq, sectorReq, newsReq, heatmapReq]).then(([symbolsData, sectorData, newsData, heatmapData]) => {
       setSymbols(symbolsData);
       setSectorAnalytics(sectorData?.sectors || []);
       setMarketNews(newsData?.items || []);
+      setHeatmap(heatmapData?.items || []);
       setLoadingProgress(100);
     });
   }, [newsWindow]);
+
+  const fetchScreener = useCallback(() => {
+    const params = new URLSearchParams({ preset: screenerPreset });
+    if (peMax !== '') params.set('peMax', String(peMax));
+    if (volumeSpikeMin !== '') params.set('volumeSpikeMin', String(volumeSpikeMin));
+    return fetch(`${API_BASE}/screener?${params.toString()}`)
+      .then((res) => (res.ok ? res.json() : { items: [] }))
+      .then((data) => setScreener(data.items || []));
+  }, [peMax, screenerPreset, volumeSpikeMin]);
+
+  const fetchCorrelation = useCallback((syms) => {
+    if (!syms.length) return;
+    const param = syms.map((s) => s.replace('.NS', '')).join(',');
+    fetch(`${API_BASE}/analytics/correlation?symbols=${encodeURIComponent(param)}`)
+      .then((res) => (res.ok ? res.json() : { symbols: [], matrix: [] }))
+      .then((data) => setCorrelation(data));
+  }, []);
 
   useEffect(() => {
     fetchDashboardData('day')
@@ -134,6 +159,15 @@ const Dashboard = () => {
       .then((data) => setMarketNews(data?.items || []))
       .catch((error) => console.error(error));
   }, [newsWindow]);
+
+  useEffect(() => {
+    fetchScreener().catch((e) => console.error(e));
+  }, [fetchScreener]);
+
+  useEffect(() => {
+    const seed = watchlist.length ? watchlist.slice(0, 8) : symbols.slice(0, 8).map((s) => s.symbol);
+    fetchCorrelation(seed);
+  }, [watchlist, symbols, fetchCorrelation]);
 
   if (loading) {
     return (
@@ -181,6 +215,18 @@ const Dashboard = () => {
               ? `${leadingSector.avgReturnPct.toFixed(2)}% avg return`
               : 'Refreshing...'}
           </div>
+        </div>
+      </div>
+
+      <div className="premium-card">
+        <h2 className="section-title">Sector Heatmap</h2>
+        <div className="heatmap-grid">
+          {heatmap.map((item) => (
+            <div key={item.sector} className="heatmap-cell" style={{ backgroundColor: item.color }}>
+              <div>{item.sector}</div>
+              <strong>{item.value}%</strong>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -268,6 +314,68 @@ const Dashboard = () => {
               </div>
             </a>
           ))}
+        </div>
+      </div>
+
+      <div className="premium-card">
+        <div className="dashboard-news-header">
+          <h2 className="section-title">Smart Stock Screener</h2>
+          <div className="window-switcher">
+            <button type="button" className={`window-btn ${screenerPreset === 'undervalued' ? 'active' : ''}`} onClick={() => setScreenerPreset('undervalued')}>Undervalued</button>
+            <button type="button" className={`window-btn ${screenerPreset === 'momentum' ? 'active' : ''}`} onClick={() => setScreenerPreset('momentum')}>Momentum stocks</button>
+          </div>
+        </div>
+        <div className="dashboard-controls">
+          <input className="control-input" type="number" value={peMax} onChange={(e) => setPeMax(e.target.value)} placeholder="PE Max (optional)" />
+          <input className="control-input" type="number" step="0.1" value={volumeSpikeMin} onChange={(e) => setVolumeSpikeMin(e.target.value)} placeholder="Volume spike min" />
+          <button className="watch-btn" type="button" onClick={() => fetchScreener()}>Run Screener</button>
+        </div>
+        <div style={{ overflowX: 'auto', marginTop: '0.8rem' }}>
+          <table className="premium-table">
+            <thead>
+              <tr>
+                <th>Symbol</th><th>PE</th><th>ROE</th><th>Debt/Equity</th><th>Vol Spike</th><th>Change%</th>
+              </tr>
+            </thead>
+            <tbody>
+              {screener.slice(0, 20).map((r) => (
+                <tr key={r.symbol}>
+                  <td>{r.symbol}</td>
+                  <td>{r.pe?.toFixed?.(2) ?? 'N/A'}</td>
+                  <td>{r.roe?.toFixed?.(2) ?? 'N/A'}</td>
+                  <td>{r.debtToEquity?.toFixed?.(2) ?? 'N/A'}</td>
+                  <td>{r.volumeSpike?.toFixed?.(2) ?? 'N/A'}x</td>
+                  <td className={(r.changePct ?? 0) >= 0 ? 'text-positive' : 'text-negative'}>{r.changePct?.toFixed?.(2) ?? 'N/A'}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="premium-card">
+        <h2 className="section-title">Correlation Matrix</h2>
+        <div style={{ overflowX: 'auto', marginTop: '0.7rem' }}>
+          <table className="premium-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                {correlation.symbols.map((s) => <th key={s}>{s.replace('.NS', '')}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {correlation.symbols.map((rowSym, i) => (
+                <tr key={rowSym}>
+                  <td>{rowSym.replace('.NS', '')}</td>
+                  {correlation.matrix[i]?.map((v, j) => (
+                    <td key={`${i}-${j}`} className={v >= 0.5 ? 'text-positive' : v <= -0.5 ? 'text-negative' : ''}>
+                      {typeof v === 'number' ? v.toFixed(2) : '-'}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 

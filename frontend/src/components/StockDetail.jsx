@@ -12,6 +12,9 @@ const StockDetail = () => {
 
   const [quote, setQuote] = useState(null);
   const [news, setNews] = useState([]);
+  const [technicals, setTechnicals] = useState(null);
+  const [alerts, setAlerts] = useState(null);
+  const [historyError, setHistoryError] = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -24,21 +27,27 @@ const StockDetail = () => {
         if (!r.ok) throw new Error('Failed to load quote');
         return r.json();
       }),
-      fetch(`${API_BASE}/stocks/${fullSymbol}/history?interval=1d`).then((r) => {
-        if (!r.ok) throw new Error('Failed to load price history');
-        return r.json();
-      }),
-      fetch(`${API_BASE}/stocks/${fullSymbol}/news`).then((r) => {
+      fetch(`${API_BASE}/stocks/${fullSymbol}/history?interval=1d`).then((r) => (r.ok ? r.json() : [])),
+      fetch(`${API_BASE}/stocks/${fullSymbol}/sentiment-news`).then((r) => {
         if (!r.ok) throw new Error('Failed to load news');
         return r.json();
-      })
-    ]).then(([quoteData, historyData, newsData]) => {
+      }),
+      fetch(`${API_BASE}/stocks/${fullSymbol}/technicals`).then((r) => (r.ok ? r.json() : null)),
+      fetch(`${API_BASE}/stocks/${fullSymbol}/alerts`).then((r) => (r.ok ? r.json() : null)),
+    ]).then(([quoteData, historyData, newsData, technicalData, alertData]) => {
       setQuote(quoteData);
-      setNews(newsData);
+      setNews(newsData?.items || []);
+      setTechnicals(technicalData);
+      setAlerts(alertData);
       setLoading(false);
 
       if (historyData && historyData.length > 0 && chartContainerRef.current) {
-        // Clear previous chart if any
+        setHistoryError('');
+      } else {
+        setHistoryError('Candlestick data is temporarily unavailable due upstream throttling. Please refresh.');
+      }
+
+      if (historyData && historyData.length > 0 && chartContainerRef.current) {
         chartContainerRef.current.innerHTML = '';
         
         chart = createChart(chartContainerRef.current, {
@@ -51,7 +60,7 @@ const StockDetail = () => {
             horzLines: { color: 'rgba(255, 255, 255, 0.05)' },
           },
           width: chartContainerRef.current.clientWidth,
-          height: 400,
+          height: 420,
         });
 
         const candlestickSeries = chart.addCandlestickSeries({
@@ -71,6 +80,17 @@ const StockDetail = () => {
         }));
 
         candlestickSeries.setData(formattedData);
+
+        const ma50Series = chart.addLineSeries({ color: '#60a5fa', lineWidth: 2, priceLineVisible: false });
+        const ma200Series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 2, priceLineVisible: false });
+        const bbUpperSeries = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1, priceLineVisible: false });
+        const bbLowerSeries = chart.addLineSeries({ color: '#a78bfa', lineWidth: 1, priceLineVisible: false });
+
+        ma50Series.setData((technicalData?.series?.ma50 || []).map((x) => ({ time: x.date.split('T')[0], value: x.value })));
+        ma200Series.setData((technicalData?.series?.ma200 || []).map((x) => ({ time: x.date.split('T')[0], value: x.value })));
+        bbUpperSeries.setData((technicalData?.series?.bbUpper || []).map((x) => ({ time: x.date.split('T')[0], value: x.value })));
+        bbLowerSeries.setData((technicalData?.series?.bbLower || []).map((x) => ({ time: x.date.split('T')[0], value: x.value })));
+
         chart.timeScale().fitContent();
 
         resizeHandler = () => {
@@ -80,6 +100,7 @@ const StockDetail = () => {
       }
     }).catch(err => {
       console.error(err);
+      setHistoryError('Unable to load stock data right now.');
       setLoading(false);
     });
 
@@ -153,10 +174,45 @@ const StockDetail = () => {
         </div>
       </div>
 
+      <div className="grid-cards" style={{ gridTemplateColumns: '1fr 1fr 1fr 1fr' }}>
+        <div className="premium-card stat-card">
+          <div className="stat-title">RSI (14)</div>
+          <div className="stat-value" style={{ fontSize: '1.15rem' }}>{technicals?.rsi14?.toFixed?.(2) ?? 'N/A'}</div>
+        </div>
+        <div className="premium-card stat-card">
+          <div className="stat-title">MACD</div>
+          <div className="stat-value" style={{ fontSize: '1.15rem' }}>{technicals?.macd?.toFixed?.(3) ?? 'N/A'}</div>
+        </div>
+        <div className="premium-card stat-card">
+          <div className="stat-title">50 / 200 DMA</div>
+          <div className="stat-value" style={{ fontSize: '1.05rem' }}>
+            {technicals?.ma50?.toFixed?.(2) ?? 'N/A'} / {technicals?.ma200?.toFixed?.(2) ?? 'N/A'}
+          </div>
+        </div>
+        <div className="premium-card stat-card">
+          <div className="stat-title">Bollinger Bands</div>
+          <div className="stat-value" style={{ fontSize: '1.05rem' }}>
+            {technicals?.bollingerLower?.toFixed?.(2) ?? 'N/A'} - {technicals?.bollingerUpper?.toFixed?.(2) ?? 'N/A'}
+          </div>
+        </div>
+      </div>
+
+      {alerts && (
+        <div className="premium-card">
+          <h2 style={{ fontSize: '1.25rem', marginBottom: '0.8rem', fontWeight: 600 }}>Smart Alerts</h2>
+          <div className="suggestions-list">
+            <div className={`suggestion-chip ${alerts.breakout ? 'text-positive' : ''}`}>Price breakout: {alerts.breakout ? 'Yes' : 'No'}</div>
+            <div className={`suggestion-chip ${alerts.volumeSpike ? 'text-positive' : ''}`}>Volume spike: {alerts.volumeSpike ? 'Yes' : 'No'}</div>
+            <div className={`suggestion-chip ${alerts.rsiCrossing ? 'text-negative' : ''}`}>RSI crossing: {alerts.rsiCrossing ? 'Triggered' : 'Stable'}</div>
+          </div>
+        </div>
+      )}
+
       {/* Chart Section */}
       <div className="premium-card">
         <h2 style={{ fontSize: '1.25rem', marginBottom: '1rem', fontWeight: 600 }}>Price History (1 Year)</h2>
         <div ref={chartContainerRef} style={{ width: '100%' }}></div>
+        {historyError && <p className="news-item-meta" style={{ marginTop: '0.75rem' }}>{historyError}</p>}
       </div>
 
       {/* News Section */}
@@ -173,6 +229,16 @@ const StockDetail = () => {
                   </h3>
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
                      {item.publisher} • {new Date(item.providerPublishTime * 1000).toLocaleDateString()}
+                     {' '}•{' '}
+                     <strong className={
+                       item.sentiment === 'bullish'
+                         ? 'text-positive'
+                         : item.sentiment === 'bearish'
+                           ? 'text-negative'
+                           : ''
+                     }>
+                       {item.sentiment === 'bullish' ? 'Bullish 🟢' : item.sentiment === 'bearish' ? 'Bearish 🔴' : 'Neutral ⚪'}
+                     </strong>
                   </p>
                </div>
              </div>
