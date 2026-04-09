@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, Newspaper, Star, TrendingUp, Users } from 'lucide-react';
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://nifty500-analysis.onrender.com/api';
 
 const WINDOW_OPTIONS = ['day', 'month', 'year'];
 

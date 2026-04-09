@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { createChart } from 'lightweight-charts';
 import { ArrowLeft, TrendingUp, TrendingDown } from 'lucide-react';
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://nifty500-analysis.onrender.com/api';
 
 const StockDetail = () => {
   const { symbol } = useParams();
